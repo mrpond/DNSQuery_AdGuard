@@ -6,226 +6,174 @@
 #include <windns.h>
 #include <WinSock2.h>
 #include <ws2tcpip.h>
-#include "stdio.h"
+#include <future> // For std::async and std::future
+#include <iostream>
 
-bool adguard_dnsblock (const char* nodename) {
-	DNS_STATUS dnsStatus;
-	PDNS_RECORD QueryResult;
-	PIP4_ARRAY pSrvList = NULL;
-	bool isBlock = false;
-	char resolvedIP[INET6_ADDRSTRLEN]{};
-	pSrvList = (PIP4_ARRAY)LocalAlloc (LPTR, sizeof (IP4_ARRAY));
+bool query_dns(const char* dns_server, const char* nodename, PDNS_RECORD* query_result) {
+	IP4_ARRAY srvlist = { 0 };
 
-	if (pSrvList) {
-		printf ("pSrvList Alloc success\n");
-		if (1 == InetPton (AF_INET,
-							"176.103.130.134", // dns server ip
-							&pSrvList->AddrArray[0])) {
-			// "Family protection"
-			// adguard.com/en/adguard-dns/overview.html 
-			pSrvList->AddrCount = 1;
-			printf ("InetPton success \n");
-			dnsStatus = DnsQuery (nodename,
-									DNS_TYPE_A,
-									DNS_QUERY_WIRE_ONLY,
-									pSrvList,
-									&QueryResult,
-									NULL); // Reserved
-			if (0 == dnsStatus) {
-				printf ("dnsStatus == 0 success\n");
-				if (QueryResult) {
-					printf ("QueryResult\n");
-					for (auto p = QueryResult; p; p = p->pNext) {
-						// 0.0.0.0
-						InetNtop (AF_INET,
-								   &p->Data.A.IpAddress,
-								   resolvedIP,
-								   sizeof (resolvedIP));
-						if (_stricmp (resolvedIP, "0.0.0.0") == 0)
-							isBlock = true; // AdGuard Block		
-						//printf ("isBlock\n");
-					}
-					DnsRecordListFree (QueryResult, DnsFreeRecordList);
-					printf ("DnsRecordListFree\n");
-				} // QueryResult
-			} // dnsStatus
-		} // inet_pton
+	if (1 != InetPton(AF_INET,
+		dns_server, // dns server ip
+		&srvlist.AddrArray[0])) {
 
-		LocalFree (pSrvList);
-	} // pSrvList
-	return isBlock;
-}
-
-bool getaddrinfo_check (const char* nodename) {
-	WSADATA wsaData;
-	int iResult;
-	DWORD dwRetval;
-
-	struct addrinfo* result = NULL;
-	//struct addrinfo* ptr = NULL;
-	struct addrinfo hints;
-
-	// Initialize Winsock
-	iResult = WSAStartup (MAKEWORD (2, 2), &wsaData);
-	if (iResult != 0) {
-		printf ("WSAStartup failed: %d\n", iResult);
+		std::cerr << "InetPton failed, GLE = " << GetLastError() << std::endl;
 		return false;
 	}
 
+	srvlist.AddrCount = 1;
+
+	DNS_STATUS dns_status = DnsQuery(nodename,
+		DNS_TYPE_A, //DNS_TYPE_AAAA,
+		DNS_QUERY_WIRE_ONLY,
+		&srvlist,
+		query_result,
+		nullptr); // Reserved
+
+	if (0 != dns_status) {
+		std::cerr << "DnsQuery failed returned " << dns_status << " GLE = " << GetLastError() << std::endl;
+		return false;
+
+	}
+
+	return true;
+}
+
+bool getaddrinfo_check(const char* nodename)
+{
 	// Setup the hints address info structure
-	SecureZeroMemory (&hints, sizeof (hints));
+	struct addrinfo hints;
+	SecureZeroMemory(&hints, sizeof(hints));
+
 	hints.ai_family = AF_UNSPEC;
 	hints.ai_socktype = SOCK_STREAM;
 	hints.ai_protocol = IPPROTO_TCP;
 
-
-	dwRetval = getaddrinfo (nodename, nullptr, &hints, &result);
-	if (dwRetval != 0) {
-		printf ("getaddrinfo failed with error: %d\n", dwRetval);
-		WSACleanup ();
-		return 1;
+	struct addrinfo* result = nullptr;
+	const int ret_val = getaddrinfo(nodename, nullptr, &hints, &result);
+	if (ret_val != 0) {
+		std::cerr << "getaddrinfo failed with error: " << ret_val << std::endl;
+		return false;
 	}
 
-	printf ("getaddrinfo returned success\n");
+	int index = 0;
+	char ipaddr[INET6_ADDRSTRLEN]; // Large enough for IPv4 or IPv6
 
-	struct addrinfo *ptr = result;
-	int i = 1;
+	for (auto ptr = result; ptr; ptr = ptr->ai_next) {
+		index++;
+		std::cout << "Record #" << index << std::endl;
 
-
-	char ipaddr2[INET6_ADDRSTRLEN];
-
-
-	while (ptr) {
-		printf ("getaddrinfo response %d\n", i++);
-		printf ("\tFlags: 0x%x\n", ptr->ai_flags);
-		printf ("\tIP Addr: ");
-		struct sockaddr_in* ipv4 = (struct sockaddr_in*)ptr->ai_addr;
-		InetNtop (ptr->ai_family, &(ipv4->sin_addr), ipaddr2, sizeof (ipaddr2));
-		printf ("\tIPv4 address %s\n", ipaddr2);
-		printf ("\tTest change\n");
-		InetPton (AF_INET, "0.0.0.0", &(ipv4->sin_addr));
-
-		InetNtop (ptr->ai_family, &(ipv4->sin_addr), ipaddr2, sizeof (ipaddr2));
-		printf ("\tIPv4 address %s\n", ipaddr2);
-		printf ("\tSocket type: ");
-		switch (ptr->ai_socktype) {
-		case 0:
-			printf ("Unspecified\n");
-			break;
-		case SOCK_STREAM:
-			printf ("SOCK_STREAM (stream)\n");
-			break;
-		case SOCK_DGRAM:
-			printf ("SOCK_DGRAM (datagram) \n");
-			break;
-		case SOCK_RAW:
-			printf ("SOCK_RAW (raw) \n");
-			break;
-		case SOCK_RDM:
-			printf ("SOCK_RDM (reliable message datagram)\n");
-			break;
-		case SOCK_SEQPACKET:
-			printf ("SOCK_SEQPACKET (pseudo-stream packet)\n");
-			break;
+		switch (ptr->ai_family)
+		{
+		case AF_INET:
+		{
+			struct sockaddr_in* ipv4 = (struct sockaddr_in*)ptr->ai_addr;
+			if (InetNtop(AF_INET, &ipv4->sin_addr, ipaddr, sizeof(ipaddr))) {
+				std::cout << "IPv4 address: " << ipaddr << std::endl;
+			}
+			else {
+				std::cerr << "InetNtop failed: " << GetLastError() << std::endl;
+			}
+		}
+		break;
+		case AF_INET6:
+		{
+			struct sockaddr_in6* ipv6 = (struct sockaddr_in6*)ptr->ai_addr;
+			if (InetNtop(AF_INET6, &ipv6->sin6_addr, ipaddr, sizeof(ipaddr))) {
+				std::cout << "IPv6 address: " << ipaddr << std::endl;
+			}
+			else {
+				std::cerr << "InetNtop failed: " << GetLastError() << std::endl;
+			}
+		}
+		break;
 		default:
-			printf ("Other %ld\n", ptr->ai_socktype);
+			std::cout << "Unknown address family: " << ptr->ai_family << std::endl;
 			break;
 		}
-		printf ("\tProtocol: ");
-		switch (ptr->ai_protocol) {
-		case 0:
-			printf ("Unspecified\n");
-			break;
-		case IPPROTO_TCP:
-			printf ("IPPROTO_TCP (TCP)\n");
-			break;
-		case IPPROTO_UDP:
-			printf ("IPPROTO_UDP (UDP) \n");
-			break;
-		default:
-			printf ("Other %ld\n", ptr->ai_protocol);
-			break;
-		}
-		printf ("\tLength of this sockaddr: %d\n", ptr->ai_addrlen);
-		printf ("\tCanonical name: %s\n", ptr->ai_canonname);
-
-		ptr = ptr->ai_next;
 	}
 
+	freeaddrinfo(result);
 
-	freeaddrinfo (result);
-	WSACleanup ();
 	return true;
 }
 
-int main (int argc, char** argv)
+int main(int argc, char** argv)
 {
-	DNS_STATUS dnsStatus;
-	PDNS_RECORD ppQueryResultsSet, p;
-	PIP4_ARRAY pSrvList = NULL;
-	int iRecord = 0;
-	const char* dns_server = "176.103.130.134"; // "Family protection"
-	if (argc != 2)
-	{
-		printf ("Usage: %s hostname\n\n", argv[0]);
-		return -2;
-	}
+	WSADATA wsaData;
+	// Initialize Winsock
+	const int error_code = WSAStartup(MAKEWORD(2, 2), &wsaData);
 
-	printf ("Querying for host: %s\n", argv[1]);
-
-	if (argc == 2) // Get the IP address of the DNS server to query
-	{
-		pSrvList = (PIP4_ARRAY)LocalAlloc (LPTR, sizeof (IP4_ARRAY));
-		if (!pSrvList)
-		{
-			printf ("PIP4_ARRAY allocation failed \n");
-			return -3;
-		}
-
-		
-		InetPton (AF_INET, "176.103.130.134", &pSrvList->AddrArray[0]);
-		pSrvList->AddrCount = 1;
-
-		printf ("Querying DNS Server: 176.103.130.134\n");
-	}
-
-	dnsStatus = DnsQuery (argv[1],
-		DNS_TYPE_A,
-		DNS_QUERY_DNSSEC_OK,
-		pSrvList, // Documented as reserved, but can take a PIP4_ARRAY for the DNS server
-		&ppQueryResultsSet,
-		NULL); // Reserved
-
-	if (dnsStatus)
-	{
-
-		printf ("\nDNSQuery failed and returned %d, GLE = %d\n\n", dnsStatus, GetLastError ());
+	if (error_code != 0) {
+		std::cerr << "WSAStartup failed: " << error_code << std::endl;
 		return -1;
 	}
 
-	p = ppQueryResultsSet;
+	PDNS_RECORD query_result = nullptr;
+	char ipaddr[INET6_ADDRSTRLEN]; // Large enough for IPv4 or IPv6
 
-	while (p) // Loop through the returned addresses
+	if (argc != 3)
 	{
-
-		iRecord++;
-		printf ("\nRecord #%d\n", iRecord);
-		char ipaddr2[INET6_ADDRSTRLEN];
-		InetNtop (AF_INET, &p->Data.A.IpAddress, ipaddr2, sizeof (ipaddr2));
-		printf ("The IP address of %s is %s \n", p->pName, ipaddr2);
-		//printf ("Type %d Host %s \n", p->wType, &p->Data.CNAME.pNameHost);;
-		printf ("TTL: %d (secs)\n", p->dwTtl);
-
-		p = p->pNext;
+		std::cout << "Usage: " << argv[0] << " hostname dns server" << std::endl;
+		std::cout << "Example: " << argv[0] << " google.com 176.103.130.134" << std::endl;
+		WSACleanup();
+		return -3;
 	}
 
-	if (pSrvList) LocalFree (pSrvList);
+	auto future = std::async(std::launch::async, query_dns, argv[2], argv[1], &query_result);
 
-	DnsRecordListFree (ppQueryResultsSet, DnsFreeRecordList);
-
-	getaddrinfo_check (argv[1]);
-
-	if (adguard_dnsblock (argv[1])) {
-		printf ("Blocked\n");
+	// Query using getaddrinfo
+	std::cout << "Performing getaddrinfo for host: " << argv[1] << std::endl;
+	if (!getaddrinfo_check(argv[1])) {
+		std::cerr << "getaddrinfo_check failed" << std::endl;
 	}
+
+	std::cout << "Querying host: " << argv[1] << " from DNS server: " << argv[2] << std::endl;
+
+	if (true == future.get()) {
+		if (query_result) {
+			int index = 0;
+			for (auto p = query_result; p; p = p->pNext) {
+				index++;
+				std::cout << "Record #" << index << std::endl;
+
+				switch (p->wType)
+				{
+				case DNS_TYPE_A:
+				{
+					if (InetNtop(AF_INET, &p->Data.A.IpAddress, ipaddr, sizeof(ipaddr))) {
+						std::cout << "IPv4 address: " << ipaddr << std::endl;
+						std::cout << "TTL: " << p->dwTtl << " (secs)" << std::endl;
+					}
+					else {
+						std::cerr << "InetNtop failed: " << GetLastError() << std::endl;
+					}
+				}
+				break;
+				case DNS_TYPE_AAAA:
+				{
+					if (InetNtop(AF_INET6, &p->Data.AAAA.Ip6Address, ipaddr, sizeof(ipaddr))) {
+						std::cout << "IPv6 address: " << ipaddr << std::endl;
+						std::cout << "TTL: " << p->dwTtl << " (secs)" << std::endl;
+					}
+					else {
+						std::cerr << "InetNtop failed: " << GetLastError() << std::endl;
+					}
+				}
+				break;
+				default:
+					std::cout << "Skipping non-A record (type: " << p->wType << ")" << std::endl;
+					continue; // Skip TTL for non-A records
+				}
+
+
+			}
+			DnsRecordListFree(query_result, DnsFreeRecordList);
+		}
+		else {
+			std::cout << "No records returned" << std::endl;
+		}
+	}
+
+	WSACleanup();
+	return 0;
 }
