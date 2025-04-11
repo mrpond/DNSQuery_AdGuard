@@ -119,17 +119,15 @@ int main(int argc, char** argv)
 		return -3;
 	}
 
-	auto future = std::async(std::launch::async, query_dns, argv[2], argv[1], &query_result);
 
 	// Query using getaddrinfo
+	auto os_dns_query = std::async(std::launch::async, getaddrinfo_check, argv[1]);
+	auto dns_query_custom = std::async(std::launch::async, query_dns, argv[2], argv[1], &query_result);
 	std::cout << "Performing getaddrinfo for host: " << argv[1] << std::endl;
-	if (!getaddrinfo_check(argv[1])) {
-		std::cerr << "getaddrinfo_check failed" << std::endl;
-	}
+	os_dns_query.get();
 
 	std::cout << "Querying host: " << argv[1] << " from DNS server: " << argv[2] << std::endl;
-
-	if (true == future.get()) {
+	if (true == dns_query_custom.get()) {
 		if (query_result) {
 			int index = 0;
 			for (auto p = query_result; p; p = p->pNext) {
